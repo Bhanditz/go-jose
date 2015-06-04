@@ -17,9 +17,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"runtime"
+	"sync"
 
 	"github.com/codegangsta/cli"
 	"github.com/square/go-jose"
@@ -29,9 +32,11 @@ func main() {
 	app := cli.NewApp()
 	app.Name = "jose-util"
 	app.Usage = "command-line utility to deal with JOSE objects"
-	app.Version = "0.0.2"
+	app.Version = "0.0.3"
 	app.Author = ""
 	app.Email = ""
+
+	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	app.Commands = []cli.Command{
 		{
@@ -76,7 +81,10 @@ func main() {
 				crypter, err := jose.NewEncrypter(alg, enc, pub)
 				exitOnError(err, "unable to instantiate encrypter")
 
-				obj, err := crypter.Encrypt(readInput(c.String("input")))
+				input := readInput(c.String("input"), false)
+				input.Scan()
+
+				obj, err := crypter.Encrypt(input.Bytes())
 				exitOnError(err, "unable to encrypt")
 
 				var msg string
@@ -106,6 +114,10 @@ func main() {
 					Name:  "output, out",
 					Usage: "Path to output file (stdout if missing)",
 				},
+				cli.BoolFlag{
+					Name:  "batch",
+					Usage: "Batch decrypt messages (newline-separated)",
+				},
 			},
 			Action: func(c *cli.Context) {
 				keyBytes, err := ioutil.ReadFile(requiredFlag(c, "key"))
@@ -114,13 +126,21 @@ func main() {
 				priv, err := jose.LoadPrivateKey(keyBytes)
 				exitOnError(err, "unable to read private key")
 
-				obj, err := jose.ParseEncrypted(string(readInput(c.String("input"))))
-				exitOnError(err, "unable to parse message")
+				worker := func(msg []byte, future chan []byte) {
+					obj, err := jose.ParseEncrypted(string(msg))
+					exitOnError(err, "unable to parse message")
 
-				plaintext, err := obj.Decrypt(priv)
-				exitOnError(err, "unable to decrypt message")
+					plaintext, err := obj.Decrypt(priv)
+					exitOnError(err, "unable to decrypt message")
 
-				writeOutput(c.String("output"), plaintext)
+					future <- plaintext
+				}
+
+				writer := func(output []byte) {
+					writeOutput(c.String("output"), output)
+				}
+
+				parMap(readInput(c.String("input"), c.Bool("batch")), worker, writer)
 			},
 		},
 		{
@@ -159,7 +179,10 @@ func main() {
 				signer, err := jose.NewSigner(alg, signingKey)
 				exitOnError(err, "unable to make signer")
 
-				obj, err := signer.Sign(readInput(c.String("input")))
+				input := readInput(c.String("input"), false)
+				input.Scan()
+
+				obj, err := signer.Sign(input.Bytes())
 				exitOnError(err, "unable to sign")
 
 				var msg string
@@ -189,6 +212,10 @@ func main() {
 					Name:  "output, out",
 					Usage: "Path to output file (stdout if missing)",
 				},
+				cli.BoolFlag{
+					Name:  "batch",
+					Usage: "Batch decrypt messages (newline-separated)",
+				},
 			},
 			Action: func(c *cli.Context) {
 				keyBytes, err := ioutil.ReadFile(requiredFlag(c, "key"))
@@ -197,13 +224,21 @@ func main() {
 				verificationKey, err := jose.LoadPublicKey(keyBytes)
 				exitOnError(err, "unable to read private key")
 
-				obj, err := jose.ParseSigned(string(readInput(c.String("input"))))
-				exitOnError(err, "unable to parse message")
+				worker := func(signed []byte, future chan []byte) {
+					obj, err := jose.ParseSigned(string(signed))
+					exitOnError(err, "unable to parse message")
 
-				plaintext, err := obj.Verify(verificationKey)
-				exitOnError(err, "invalid signature")
+					payload, err := obj.Verify(verificationKey)
+					exitOnError(err, "invalid signature")
 
-				writeOutput(c.String("output"), plaintext)
+					future <- payload
+				}
+
+				writer := func(output []byte) {
+					writeOutput(c.String("output"), output)
+				}
+
+				parMap(readInput(c.String("input"), c.Bool("batch")), worker, writer)
 			},
 		},
 		{
@@ -224,20 +259,21 @@ func main() {
 				},
 			},
 			Action: func(c *cli.Context) {
-				input := string(readInput(c.String("input")))
+				input := readInput(c.String("input"), false)
+				input.Scan()
 
 				var serialized string
 				var err error
 				switch c.String("format") {
 				case "", "JWE":
 					var jwe *jose.JsonWebEncryption
-					jwe, err = jose.ParseEncrypted(input)
+					jwe, err = jose.ParseEncrypted(input.Text())
 					if err == nil {
 						serialized = jwe.FullSerialize()
 					}
 				case "JWS":
 					var jws *jose.JsonWebSignature
-					jws, err = jose.ParseSigned(input)
+					jws, err = jose.ParseSigned(input.Text())
 					if err == nil {
 						serialized = jws.FullSerialize()
 					}
@@ -272,18 +308,54 @@ func exitOnError(err error, msg string) {
 }
 
 // Read input from file or stdin
-func readInput(path string) []byte {
-	var bytes []byte
-	var err error
-
-	if path != "" {
-		bytes, err = ioutil.ReadFile(path)
+func readInput(path string, batch bool) (scanner *bufio.Scanner) {
+	if path == "" {
+		scanner = bufio.NewScanner(os.Stdin)
 	} else {
-		bytes, err = ioutil.ReadAll(os.Stdin)
+		file, err := os.Open(path)
+		exitOnError(err, "unable to read input")
+		scanner = bufio.NewScanner(file)
 	}
 
-	exitOnError(err, "unable to read input")
-	return bytes
+	if !batch {
+		scanner.Split(readFullInput)
+	}
+
+	return
+}
+
+func parMap(input *bufio.Scanner, worker func([]byte, chan []byte), writer func([]byte)) {
+	output := make(chan chan []byte, runtime.NumCPU())
+	group := sync.WaitGroup{}
+
+	// Print outputs
+	go func() {
+		for {
+			writer(<-<-output)
+			group.Done()
+		}
+	}()
+
+	// Run workers in parallel
+	for input.Scan() {
+		group.Add(1)
+		future := make(chan []byte)
+		output <- future
+
+		// Using append to create a copy of the scanned data, otherwise we'll
+		// run into trouble since bufio.Scanner will overwrite the array.
+		go worker(append([]byte{}, input.Bytes()...), future)
+	}
+
+	group.Wait()
+}
+
+func readFullInput(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	} else {
+		return 0, nil, nil
+	}
 }
 
 // Write output to file or stdin

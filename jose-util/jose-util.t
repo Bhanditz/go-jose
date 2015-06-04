@@ -86,3 +86,29 @@ Sign and verify a test message (EC).
   > jose-util sign --alg ES384 --key ec.key |
   > jose-util verify --key ec.pub
   Lorem ipsum dolor sit amet
+
+Test batch decrypt functionality.
+
+  $ for n in `seq 1 5`; do
+  >   echo "Message $n" | jose-util encrypt --alg RSA-OAEP --enc A128GCM --key rsa.pub
+  >   echo
+  > done > encrypted
+  $ jose-util decrypt --batch --key rsa.key < encrypted
+  Message 1
+  Message 2
+  Message 3
+  Message 4
+  Message 5
+
+Test batch verify functionality.
+
+  $ for n in `seq 1 5`; do
+  >   echo "Message $n" | jose-util sign --alg PS256 --key rsa.key
+  >   echo
+  > done > signed
+  $ jose-util verify --batch --key rsa.pub < signed
+  Message 1
+  Message 2
+  Message 3
+  Message 4
+  Message 5

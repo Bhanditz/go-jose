@@ -26,6 +26,17 @@ optional support for multiple recipients. It also comes with a small
 command-line utility (`jose-util`) for encrypting/decrypting JWE messages in a
 shell.
 
+### Versioning
+
+We use `gopkg.in` for versioning.
+
+**Version 1**: Use `gopkg.in/square/go-jose.v1` to import. This is the current stable version,
+and is guaranteed to stay backwards-compatible.
+
+**Master**: Use `github.com/square/go-jose` to import from the master branch. This is
+where development happens, and while the interface is currently stable there
+is no guarantee that we won't make changes in the future.
+
 ### Supported algorithms
 
 See below for a table of supported algorithms. Algorithm identifiers match

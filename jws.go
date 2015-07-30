@@ -196,7 +196,7 @@ func parseSignedCompact(input string) (*JsonWebSignature, error) {
 
 // CompactSerialize serializes an object using the compact serialization format.
 func (obj JsonWebSignature) CompactSerialize() (string, error) {
-	if len(obj.Signatures) > 1 || obj.Signatures[0].header != nil || obj.Signatures[0].protected == nil {
+	if len(obj.Signatures) != 1 || obj.Signatures[0].header != nil || obj.Signatures[0].protected == nil {
 		return "", ErrNotSupported
 	}
 
